@@ -8,7 +8,10 @@ import java.rmi.server.UnicastRemoteObject;
 public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface {
 
     private static final long serialVersionUID = 1L;
-
+    
+    private static String name;
+    private static String hostname;
+    
     protected RaftServer() throws RemoteException {
         super();
     }
@@ -20,8 +23,19 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     public static void main(String[] args) throws MalformedURLException, RemoteException, NotBoundException {
         
+        if (args.length != 2) {
+            System.out.println("Usage: RaftServer <name> <hostname>");
+            return;
+        }
+        
+        name = args[0];
+        hostname = args[1];
+        
+        System.out.println("Name: " + name);
+        System.out.println("Hostname: " + hostname);
+        
         try {
-            Naming.rebind("//127.0.0.1/RaftServer", new RaftServer());
+            Naming.rebind("//" + hostname + "/" + name, new RaftServer());
             System.out.println("Server ready");
         } catch (Exception ex) {
             System.err.println("Server exception: " + ex.toString());
@@ -29,7 +43,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         }
         
         
-        RaftRMIInterface lookUp = (RaftRMIInterface)Naming.lookup("//127.0.0.1/RaftServer");
+        RaftRMIInterface lookUp = (RaftRMIInterface)Naming.lookup("//" + hostname + "/" + name);
         String response = lookUp.hello("alice");
         System.out.println("Response: " + response);
     }
