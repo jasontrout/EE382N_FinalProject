@@ -71,7 +71,7 @@ public class RaftRMI {
 
     }
 
-    //raft related function
+    @Override
     public RaftMessage requestVote(Host host, long term, int logLastIndex, long logLastTerm, String voteFor) throws Exception {
         //Thread.sleep();
 
@@ -87,6 +87,7 @@ public class RaftRMI {
         return null;
     }
 
+    @Override
     public RaftMessage appendEntry(Host host, long term, int logCurrentIndex, long logCurrentTerm, String leaderId, boolean isHeartBeats){
 
         try {
@@ -99,5 +100,19 @@ public class RaftRMI {
             System.out.println("RaftRMI(): appendEntry exception");
         }
         return null;
+    }
+
+    @Override
+    public RaftMessage installSnapshot(long serverId, long term, long lastSnapshotIndex, long byteOffset, byte[] data, boolean isDone) {
+      try {
+          Registry registry = LocateRegistry.getRegistry(host.getAddress(), host.getPort());
+          RaftRMIInterface stub = (RaftRMIInterface)registry.lookup("rmi://" + host.getAddress() + "/" + host.getPort() + "/" + host.getId());
+          return stub.installSnapshot(serverId, term, lastSnapshotIndex, byteOffset, data, isDone);
+      } catch (RemoteException e) {
+        System.out.println("RaftRMI(): installSnapshot exception");
+      } catch (NotBoundException e) {
+        System.out.println("RaftRMI(): installSnapshot exception");
+      }
+      return null;
     }
 }
