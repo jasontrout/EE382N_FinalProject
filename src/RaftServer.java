@@ -1,4 +1,3 @@
-
 import java.net.MalformedURLException;
 import java.rmi.Naming;
 import java.rmi.NotBoundException;
@@ -9,12 +8,13 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     private static final long serialVersionUID = 1L;
     
-    private static String id;
-    private static String hostname;
-    private static int port;
+    private int id;
+ 
+    private RaftServersCfg cfg;
     
     protected RaftServer() throws RemoteException {
         super();
+        this.id = id;
     }
 
     @Override
@@ -22,19 +22,22 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         return "Hello, " + name + "!";
     }
 
-    public static void main(String[] args) throws MalformedURLException, RemoteException, NotBoundException {
-        
+    private void init(String[] args) {
         if (args.length != 1) {
             System.out.println("Usage: RaftServer <id>");
             return;
         }
-
-        id = args[0];
- 
-        System.out.println("RaftServer " + id + " started!");
-
+        id = Integer.parseInt(args[0]);
      
-       
+        cfg = new RaftServersCfg("servers.cfg");
+  
+        System.out.println("\nRaft Server[" + id + "]  Started. Listening on " + cfg.getInfoById(id).getHostname() + ":" + cfg.getInfoById(id).getPort() + "\n");
+    }
+
+    public static void main(String[] args) throws MalformedURLException, RemoteException, NotBoundException {
+        
+        RaftServer server = new RaftServer();
+        server.init(args);
         /* 
         name = args[0];
         hostname = args[1];
