@@ -17,11 +17,6 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         this.id = id;
     }
 
-    @Override
-    public String hello(String name) throws RemoteException {
-        return "Hello, " + name + "!";
-    }
-
     private void init(String[] args) {
         if (args.length != 1) {
             System.out.println("Usage: RaftServer <id>");
@@ -60,4 +55,15 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         System.out.println("Response: " + response);
        */
     }
+
+    @Override
+    public void requestVote(long term, long candidateId, long lastLogIndex, long lastLogTerm) throws RemoteException {
+      System.out.println("Request vote!");
+    }
+
+    @Override
+    public void appendEntries(long term, long leaderId, long prevLogIndex, RaftEntry[] entries, long leaderCommit) throws RemoteException {
+      System.out.println("Append entries!");
+    }
+    
 }
