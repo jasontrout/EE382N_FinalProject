@@ -1,16 +1,16 @@
 class RaftServerInfo {
   
-    private int id;
+    private Long id;
     private String hostname; 
-    private int port;
+    private Integer port;
 
-    public RaftServerInfo(int id, String hostname, int port) {
+    public RaftServerInfo(Long id, String hostname, Integer port) {
         this.id = id;
         this.hostname = hostname;
         this.port = port;
     }
 
-    public int getId() {
+    public Long getId() {
         return id;
     }
 
@@ -18,7 +18,7 @@ class RaftServerInfo {
         return hostname;
     }
 
-    public int getPort() {
+    public Integer getPort() {
         return port;
     }
 }

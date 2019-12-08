@@ -7,11 +7,19 @@ import java.rmi.server.UnicastRemoteObject;
 public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface {
 
     private static final long serialVersionUID = 1L;
-    
-    private int id;
- 
+
+    private static Long currentTerm;
+    private static Long votedFor;
+    private static RaftEntry[] log;
+
     private RaftServersCfg cfg;
     
+    private Long id;
+    private Long commitIndex;
+    private Long lastApplied;
+    private Long[] nextIndex;
+    private Long[] matchIndex;
+ 
     protected RaftServer() throws RemoteException {
         super();
         this.id = id;
@@ -22,7 +30,9 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
             System.out.println("Usage: RaftServer <id>");
             return;
         }
-        id = Integer.parseInt(args[0]);
+        id = Long.parseLong(args[0]);
+        currentTerm = 0L;
+        votedFor = null;
      
         cfg = new RaftServersCfg("servers.cfg");
   
@@ -57,13 +67,13 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     }
 
     @Override
-    public RaftRpcResult requestVote(long term, long candidateId, long lastLogIndex, long lastLogTerm) throws RemoteException {
+    public RaftRpcResult requestVote(Long term, Long candidateId, Long lastLogIndex, Long lastLogTerm) throws RemoteException {
       System.out.println("Request vote!");
       return null;
     }
 
     @Override
-    public RaftRpcResult appendEntries(long term, long leaderId, long prevLogIndex, RaftEntry[] entries, long leaderCommit) throws RemoteException {
+    public RaftRpcResult appendEntries(Long term, Long leaderId, Long prevLogIndex, RaftEntry[] entries, Long leaderCommit) throws RemoteException {
       System.out.println("Append entries!");
       return null;
     }

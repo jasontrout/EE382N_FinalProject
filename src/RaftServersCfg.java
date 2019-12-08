@@ -6,7 +6,7 @@ import java.util.TreeMap;
 
 class RaftServersCfg {
 
-    private Map<Integer, RaftServerInfo> idToRaftServerInfoMap = new TreeMap<>();
+    private Map<Long, RaftServerInfo> idToRaftServerInfoMap = new TreeMap<>();
 
     private void load(String filePath) {
         BufferedReader reader;
@@ -15,9 +15,9 @@ class RaftServersCfg {
             String line = reader.readLine();
             while (line != null) {
               String[] tokens = line.split(",");
-              int id = Integer.parseInt(tokens[0]);
+              Long id = Long.parseLong(tokens[0]);
               String hostname = tokens[1];
-              int port = Integer.parseInt(tokens[2]);
+              Integer port = Integer.parseInt(tokens[2]);
               RaftServerInfo info = new RaftServerInfo(id, hostname, port);
               idToRaftServerInfoMap.put(id, info);
               line = reader.readLine();
@@ -32,12 +32,12 @@ class RaftServersCfg {
         load(filePath);
     }
 
-    public RaftServerInfo getInfoById(int id) {
+    public RaftServerInfo getInfoById(Long id) {
       return idToRaftServerInfoMap.get(id);
     }
 
-    public Map<Integer, RaftServerInfo> getInfos() {
-      Map<Integer, RaftServerInfo> map = new TreeMap<>();
+    public Map<Long, RaftServerInfo> getInfos() {
+      Map<Long, RaftServerInfo> map = new TreeMap<>();
       map.putAll(idToRaftServerInfoMap);
       return map;
     }
