@@ -1,16 +1,16 @@
 import java.io.Serializable;
 
-public class RaftRpcResult implements Serializable {
+public class RaftAppendEntriesResult implements Serializable {
 
     public static final long serialVersionUID = 1L;
 
     private long term;
     private boolean success;
 
-    public RaftRpcResult() {
+    public RaftAppendEntriesResult() {
     }
  
-    public RaftRpcResult(long term, boolean success) { 
+    public RaftAppendEntriesResult(long term, boolean success) { 
         this.term = term;
         this.success = success;
     }

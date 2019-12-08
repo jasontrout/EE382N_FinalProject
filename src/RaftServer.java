@@ -67,13 +67,13 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     }
 
     @Override
-    public RaftRpcResult requestVote(Long term, Long candidateId, Long lastLogIndex, Long lastLogTerm) throws RemoteException {
+    public RaftRequestVoteResult requestVote(Long term, Long candidateId, Long lastLogIndex, Long lastLogTerm) throws RemoteException {
       System.out.println("Request vote!");
       return null;
     }
 
     @Override
-    public RaftRpcResult appendEntries(Long term, Long leaderId, Long prevLogIndex, RaftEntry[] entries, Long leaderCommit) throws RemoteException {
+    public RaftAppendEntriesResult appendEntries(Long term, Long leaderId, Long prevLogIndex, RaftEntry[] entries, Long leaderCommit) throws RemoteException {
       System.out.println("Append entries!");
       return null;
     }
