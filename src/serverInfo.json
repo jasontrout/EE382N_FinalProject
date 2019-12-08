@@ -1,0 +1,9 @@
+{
+  "servers": [
+    { "id": 1, "hostname": "127.0.0.1", "port": 9001 },
+    { "id": 2, "hostname": "127.0.0.1", "port": 9002 },
+    { "id": 3, "hostname": "127.0.0.1", "port": 9003 },
+    { "id": 4, "hostname": "127.0.0.1", "port": 9004 },
+    { "id": 5, "hostname": "127.0.0.1", "port": 9005 }
+  ] 
+}
