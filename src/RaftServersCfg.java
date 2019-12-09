@@ -33,12 +33,16 @@ class RaftServersCfg {
     }
 
     public RaftServerInfo getInfoById(Long id) {
-      return idToRaftServerInfoMap.get(id);
+        return idToRaftServerInfoMap.get(id);
     }
 
     public Map<Long, RaftServerInfo> getInfos() {
       Map<Long, RaftServerInfo> map = new TreeMap<>();
       map.putAll(idToRaftServerInfoMap);
       return map;
+    }
+
+    public int getNumServers() {
+        return idToRaftServerInfoMap.size();
     }
 }
