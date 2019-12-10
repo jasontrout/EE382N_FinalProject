@@ -1,3 +1,4 @@
 #!/bin/bash
 
-rm -rf dist
+rm -rf server/dist
+rm -rf client/dist

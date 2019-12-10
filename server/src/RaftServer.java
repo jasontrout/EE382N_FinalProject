@@ -8,22 +8,26 @@ import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.TreeMap;
+import java.util.TreeSet;
 
 public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface {
 
     private static final long serialVersionUID = 1L;
 
-    private static final int ELECTION_TIMEOUT_MIN_MILLIS = 1500;
-    private static final int ELECTION_TIMEOUT_MAX_MILLIS = 3000;
+    private static final int ELECTION_TIMEOUT_MIN_MILLIS = 1500; // Make 1.5s due to logging.
+    private static final int ELECTION_TIMEOUT_MAX_MILLIS = 3000; // Make 3.0s due to logging.
 
-    private static final int LEADER_HEARTBEATS_TIMER_MILLIS = 500;
+    private static final int LEADER_HEARTBEATS_TIMER_MILLIS = 500; // Make 0.5s due to logging.
 
-    private static Long currentTerm;
-    private static Long votedFor;
+    private Long currentTerm;
+    private Long votedFor;
     private static RaftEntry[] log;
+    private int numSimpleMajority;
+    private int numVotes;
 
     private RaftServersCfg cfg;
     
@@ -32,10 +36,8 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     private Long lastApplied;
     private Long[] nextIndex;
     private Long[] matchIndex;
+    private Long lastKnownLeaderId = null;
 
-    private Long serverVotedFor;
-    private int numSimpleMajority;
-    private int numVotes;
 
     private Map<Long, Boolean> idToServerStateMap = new TreeMap<>();
     private Map<Long, RaftRMIInterface> idToServerInterfaceMap = new TreeMap<>();
@@ -44,9 +46,11 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     private Timer electionTimeoutTimer;
     private ElectionTimeoutTask electionTimeoutTask;
+    boolean electionTimeoutTimerActive = false;
 
     private Timer leaderHeartbeatsTimer;
     private LeaderHeartbeatsTask leaderHeartbeatsTask;
+    boolean leaderHeartbeatsTimerActive = false;
 
     protected RaftServer(Long id, RaftServersCfg cfg) throws RemoteException {
         super();
@@ -67,16 +71,12 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     }
 
     // Gets the current term.
-    public static Long getCurrentTerm() { 
+    public Long getCurrentTerm() { 
         return currentTerm; 
     }
   
-    public static void setVotedFor(Long votedFor) {
-        RaftServer.votedFor = votedFor;
-    }
-
     // Increments the current term.
-    public static void incrementCurrentTerm() {
+    public void incrementCurrentTerm() {
         currentTerm++;
     }
   
@@ -103,23 +103,40 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     // Sets the server state to FOLLOWER, CANDIDATE, or LEADER.
     public void setServerStateTo(RaftServerState serverState) {
         numVotes = 0;
-        serverVotedFor = null;
+        votedFor = null;
         this.serverState = serverState;
-        log("I am a " + this.serverState + ".");
+        log("I am a " + this.serverState + ". Time: " + System.currentTimeMillis());
+        switch (serverState) {
+            case FOLLOWER:
+                startElectionTimeoutTimer();
+                stopLeaderHeartbeatsTimer();
+                break;
+            case CANDIDATE:
+                startElectionTimeoutTimer();
+                stopLeaderHeartbeatsTimer();
+                break;
+            case LEADER:
+                stopElectionTimeoutTimer();
+                startLeaderHeartbeatsTimer();
+                break;
+        }
     }
  
     // Sets the local voted for variable.
-    public void setServerVotedFor(Long serverVotedFor) {
-        this.serverVotedFor = serverVotedFor;
+    public void setVotedFor(Long votedFor) {
+        this.votedFor = votedFor;
     }
 
     // Stop election timeout timer.
     public void stopElectionTimeoutTimer() {
-        if (electionTimeoutTask != null) {
-            electionTimeoutTask.cancel();
-        } 
-        if (electionTimeoutTimer != null) {
-            electionTimeoutTimer.cancel();
+        if (electionTimeoutTimerActive) {
+            if (electionTimeoutTask != null) {
+                electionTimeoutTask.cancel();
+            } 
+            if (electionTimeoutTimer != null) {
+                electionTimeoutTimer.cancel();
+            }
+            electionTimeoutTimerActive = false;
         }
     }
 
@@ -129,16 +146,20 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         electionTimeoutTimer = new Timer();
         int electionTimeoutMillis = new Random().nextInt((ELECTION_TIMEOUT_MAX_MILLIS - ELECTION_TIMEOUT_MIN_MILLIS) + 1)  + ELECTION_TIMEOUT_MIN_MILLIS;
         electionTimeoutTimer.schedule(new ElectionTimeoutTask(this), electionTimeoutMillis);
+        electionTimeoutTimerActive = true;
     }
 
     // Stop leader heartbeats timer.
     public void stopLeaderHeartbeatsTimer() {
-        if (leaderHeartbeatsTask != null) { 
-            leaderHeartbeatsTask.cancel();
+        if (leaderHeartbeatsTimerActive) {
+            if (leaderHeartbeatsTask != null) { 
+                leaderHeartbeatsTask.cancel();
+            }
+            if (leaderHeartbeatsTimer != null) {
+                leaderHeartbeatsTimer.cancel();
+            }
         }
-        if (leaderHeartbeatsTimer != null) {
-            leaderHeartbeatsTimer.cancel();
-        }
+        leaderHeartbeatsTimerActive = false;
     }
 
     // Start leader heartbeats timer.
@@ -146,6 +167,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         stopLeaderHeartbeatsTimer();
         leaderHeartbeatsTimer = new Timer();
         leaderHeartbeatsTimer.schedule(new LeaderHeartbeatsTask(this), 0, LEADER_HEARTBEATS_TIMER_MILLIS);
+        leaderHeartbeatsTimerActive = true;
     }
    
     public void init() throws MalformedURLException, RemoteException, NotBoundException {
@@ -156,19 +178,46 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         Naming.rebind("//" + cfg.getInfoById(id).getHostname() + "/" + id, this);
         log("Server started.");
 
-        // Add this server to the other servers to form a cluster.  
+        // Add server interfaces to the other servers.
+        Set<Long> serverInterfacesToAddSet = new TreeSet<>();
         for (Long serverId : cfg.getInfos().keySet()) {
-            RaftRMIInterface serverInterface = (RaftRMIInterface)Naming.lookup("//" + cfg.getInfoById(serverId).getHostname() + "/" + serverId);
-            idToServerInterfaceMap.put(serverId, serverInterface);
+            serverInterfacesToAddSet.add(serverId);
         }
-
-
-        // Add server to other servers' cluster lists.
-        for (Long serverId : cfg.getInfos().keySet()) {
-            if (serverId != id) {
-                idToServerInterfaceMap.get(serverId).addServerToCluster(id);
+        Set<Long> serverInterfacesAddedSet = new TreeSet<>();
+        while (serverInterfacesToAddSet.size() > 0) {
+            for (Long serverId : serverInterfacesToAddSet) {
+                try {
+                    RaftRMIInterface serverInterface = (RaftRMIInterface)Naming.lookup("//" + cfg.getInfoById(serverId).getHostname() + "/" + serverId);
+                    idToServerInterfaceMap.put(serverId, serverInterface);
+                    serverInterfacesAddedSet.add(serverId);
+                } catch (Exception ex) {
+                    // Could not add server interface. Keeping trying.
+                }
             }
+            for (Long serverId : serverInterfacesAddedSet) {
+              serverInterfacesToAddSet.remove(serverId);
+            }
+        } 
+
+        // Form cluster.
+        Set<Long> serversToAddToSet = new TreeSet<>();
+        for (Long serverId : cfg.getInfos().keySet()) {
+            serversToAddToSet.add(serverId);
         }
+        Set<Long> serversAddedSet = new TreeSet<>();
+        while (serversToAddToSet.size() > 0) {
+            for (Long serverId : serversToAddToSet) {
+                try {
+                    idToServerInterfaceMap.get(serverId).addServerToCluster(id);
+                    serversAddedSet.add(serverId);
+                } catch (Exception ex) {
+                    // Could not add server interface. Keeping trying.
+                }
+            }
+            for (Long serverId : serversAddedSet) {
+              serversToAddToSet.remove(serverId);
+            }
+        } 
       
         // Handle shutdown.
         Runtime.getRuntime().addShutdownHook(new Thread() {
@@ -193,7 +242,6 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         RaftServersCfg initCfg = new RaftServersCfg("servers.cfg");
         try {
             String hostname = initCfg.getInfoById(initId).getHostname();
-            int port = initCfg.getInfoById(initId).getPort();
             RaftServer server = new RaftServer(initId, initCfg);
             server.init();
         } catch (Exception ex) {
@@ -208,7 +256,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
       idToServerStateMap.put(id, true);
       if (cfg.getNumServers() - 1 == idToServerStateMap.size()) {
         clusterFormed = true;
-        log("Cluster is formed. I am a " + serverState + ".");
+        log("Cluster is formed. I am a " + serverState + ". Time: " + System.currentTimeMillis());
         startElectionTimeoutTimer();
       }
     }
@@ -226,7 +274,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
                 }
             }
         }
-        log("Received requestVote. Term= " + term + "; candidateId=" + candidateId + "; lastLogIndex=" + lastLogIndex + "; lastLogTerm=" + lastLogTerm + "; voteGranted=" + voteGranted);
+        log("Received requestVote. Term=" + term + "; candidateId=" + candidateId + "; lastLogIndex=" + lastLogIndex + "; lastLogTerm=" + lastLogTerm + "; voteGranted=" + voteGranted + "; Time=" + System.currentTimeMillis());
         return new RaftRequestVoteResult(currentTerm, voteGranted);
     }
 
@@ -235,19 +283,36 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
       if (clusterFormed) {
          if (entries.length == 0) {
              switch (serverState) {
-                 case FOLLOWER:
+                 case FOLLOWER: 
                      startElectionTimeoutTimer();
+                     lastKnownLeaderId = leaderId;
                      break;
                  case CANDIDATE:
                      setServerStateTo(RaftServerState.FOLLOWER);
-                     startElectionTimeoutTimer();
+                     lastKnownLeaderId = leaderId;
+                     break;
                  case LEADER:
-                     stopElectionTimeoutTimer();
+                     if (term >= currentTerm) {
+                        setServerStateTo(RaftServerState.FOLLOWER);
+                        lastKnownLeaderId = leaderId;
+                     }
                      break;
              } 
          }
       }
       return null;
+    }
+
+    @Override
+    public RaftCmdResult processCmd(String cmd) throws RemoteException {
+      log("Processing cmd " + cmd);
+      if (serverState == RaftServerState.LEADER) {
+        log("I am the leader. Processing cmd " + cmd);
+        return new RaftCmdResult(true, id, "Command processed.");
+      } else {
+        log("I am not the leader. Last known leader is " + lastKnownLeaderId);
+        return new RaftCmdResult(false, lastKnownLeaderId, null);
+      }
     }
 
     // Log message. 

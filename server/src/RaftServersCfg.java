@@ -17,8 +17,7 @@ class RaftServersCfg {
               String[] tokens = line.split(",");
               Long id = Long.parseLong(tokens[0]);
               String hostname = tokens[1];
-              Integer port = Integer.parseInt(tokens[2]);
-              RaftServerInfo info = new RaftServerInfo(id, hostname, port);
+              RaftServerInfo info = new RaftServerInfo(id, hostname);
               idToRaftServerInfoMap.put(id, info);
               line = reader.readLine();
             }

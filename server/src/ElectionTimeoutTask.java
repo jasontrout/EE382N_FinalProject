@@ -14,9 +14,9 @@ public class ElectionTimeoutTask extends TimerTask {
         try {
             server.incrementCurrentTerm();
             server.setServerStateTo(RaftServerState.CANDIDATE);
-            server.setServerVotedFor(server.getId());
+            server.setVotedFor(server.getId());
             server.incrementNumVotes();
-            server.startElectionTimeoutTimer();
+            server.log("Voted for self."); 
             for (Long serverId : server.getCfg().getInfos().keySet()) {
                 if (serverId != server.getId()) {
                     RaftRMIInterface serverInterface = server.getServerInterface(serverId);
@@ -26,9 +26,6 @@ public class ElectionTimeoutTask extends TimerTask {
                             server.incrementNumVotes();
                             if (server.getNumVotes() == server.getNumSimpleMajority()) {
                                 server.setServerStateTo(RaftServerState.LEADER);
-                                server.setVotedFor(server.getId());
-                                server.stopElectionTimeoutTimer();
-                                server.startLeaderHeartbeatsTimer();
                             }
                         }
                     } catch (Exception ex) {

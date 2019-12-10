@@ -1,4 +1,5 @@
-servers.cfg contains the hostname and port information for each Raft server. Each Raft servers has a unique ID.
+servers.cfg contains the hostname for each Raft server. Each Raft servers has a unique ID.
 
-To run: ./run.sh
-To stop: ./stop.sh
+To start servers: ./startServers.sh
+To stop stop: ./stopServers.sh
+To start client: ./startClient.sh
