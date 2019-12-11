@@ -1,3 +1,4 @@
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.Thread;
@@ -6,6 +7,9 @@ import java.rmi.Naming;
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -18,24 +22,23 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     private static final long serialVersionUID = 1L;
 
-    private static final int ELECTION_TIMEOUT_MIN_MILLIS = 1500; // Make 1.5s due to logging.
-    private static final int ELECTION_TIMEOUT_MAX_MILLIS = 3000; // Make 3.0s due to logging.
+    private static final int ELECTION_TIMER_MIN_MILLIS = 1500; // Make 1.5s due to logging.
+    private static final int ELECTION_TIMER_MAX_MILLIS = 3000; // Make 3.0s due to logging.
 
     private static final int LEADER_HEARTBEATS_TIMER_MILLIS = 500; // Make 0.5s due to logging.
 
-    private Long currentTerm;
-    private Long votedFor;
-    private static RaftEntry[] log;
-    private int numSimpleMajority;
-    private int numVotes;
+    private Object lock = new Object();
 
     private RaftServersCfg cfg;
-    
+    private RaftServerDb db;
+
     private Long id;
-    private Long commitIndex;
-    private Long lastApplied;
-    private Long[] nextIndex;
-    private Long[] matchIndex;
+    private AtomicInteger numVotes = new AtomicInteger(0);
+    private int numMajority;
+
+    private AtomicBoolean hadLeaderActivity = new AtomicBoolean(false);
+
+    
     private Long lastKnownLeaderId = null;
 
 
@@ -44,20 +47,17 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     private boolean clusterFormed = false;
     private RaftServerState serverState = RaftServerState.FOLLOWER;
 
-    private Timer electionTimeoutTimer;
-    private ElectionTimeoutTask electionTimeoutTask;
-    boolean electionTimeoutTimerActive = false;
+    private Timer electionTimer;
+    private ElectionTask electionTask;
 
     private Timer leaderHeartbeatsTimer;
-    private LeaderHeartbeatsTask leaderHeartbeatsTask;
-    boolean leaderHeartbeatsTimerActive = false;
+    private HeartbeatsTask leaderHeartbeatsTask;
 
-    protected RaftServer(Long id, RaftServersCfg cfg) throws RemoteException {
+    protected RaftServer(Long id, RaftServersCfg cfg, RaftServerDb db) throws RemoteException, IOException {
         super();
         this.id = id;
         this.cfg = cfg;
-        currentTerm = 0L;
-        votedFor = null;
+        this.db = db;
     }
 
     // Get current server Id.
@@ -65,24 +65,29 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         return id;
     }
 
+    // Get db.
+    public RaftServerDb getDb() {
+        return db;
+    }
+
     // Get config.
     public RaftServersCfg getCfg() {
         return cfg;
     }
 
-    // Gets the current term.
-    public Long getCurrentTerm() { 
-        return currentTerm; 
-    }
-  
-    // Increments the current term.
-    public void incrementCurrentTerm() {
-        currentTerm++;
-    }
-  
     // Get number of votes this server has. 
-    public int getNumVotes() {  
+    public AtomicInteger getNumVotes() {  
         return numVotes;
+    }
+
+    // Get current server state.
+    public RaftServerState getServerState() {
+        return serverState;
+    }
+
+    // Set current server state.
+    public void setServerState(RaftServerState serverState) {
+        this.serverState = serverState; 
     }
   
     // Get server interface by ID.
@@ -90,90 +95,54 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         return idToServerInterfaceMap.get(serverId);
     }
 
-    // Get number of a simple majority.
-    public int getNumSimpleMajority() {
-        return numSimpleMajority;
+    // Get number of majority.
+    public int getNumMajority() {
+        return numMajority;
     }
 
-    // Increment number of votes.
-    public void incrementNumVotes() { 
-        numVotes++;
+    // Get lock.
+    public Object getLock() {
+        return lock; 
+    } 
+
+    // Start election timer.
+    public void startElectionTimer() {
+        electionTimer = new Timer();
+        int electionTimerMillis = new Random().nextInt((ELECTION_TIMER_MAX_MILLIS - ELECTION_TIMER_MIN_MILLIS) + 1)  + ELECTION_TIMER_MIN_MILLIS;
+        electionTimer.schedule(new ElectionTask(this), electionTimerMillis);
     }
 
-    // Sets the server state to FOLLOWER, CANDIDATE, or LEADER.
-    public void setServerStateTo(RaftServerState serverState) {
-        numVotes = 0;
-        votedFor = null;
-        this.serverState = serverState;
-        log("I am a " + this.serverState + ". Time: " + System.currentTimeMillis());
-        switch (serverState) {
-            case FOLLOWER:
-                startElectionTimeoutTimer();
-                stopLeaderHeartbeatsTimer();
-                break;
-            case CANDIDATE:
-                startElectionTimeoutTimer();
-                stopLeaderHeartbeatsTimer();
-                break;
-            case LEADER:
-                stopElectionTimeoutTimer();
-                startLeaderHeartbeatsTimer();
-                break;
+    // Stop election timer.
+    public void stopElectionTimer() {
+        if (electionTask != null) {
+            electionTask.cancel();
         }
-    }
- 
-    // Sets the local voted for variable.
-    public void setVotedFor(Long votedFor) {
-        this.votedFor = votedFor;
-    }
-
-    // Stop election timeout timer.
-    public void stopElectionTimeoutTimer() {
-        if (electionTimeoutTimerActive) {
-            if (electionTimeoutTask != null) {
-                electionTimeoutTask.cancel();
-            } 
-            if (electionTimeoutTimer != null) {
-                electionTimeoutTimer.cancel();
-            }
-            electionTimeoutTimerActive = false;
+        if (electionTimer != null) {
+            electionTimer.cancel();
         }
-    }
-
-    // Start election timeout timer.
-    public void startElectionTimeoutTimer() {
-        stopElectionTimeoutTimer();
-        electionTimeoutTimer = new Timer();
-        int electionTimeoutMillis = new Random().nextInt((ELECTION_TIMEOUT_MAX_MILLIS - ELECTION_TIMEOUT_MIN_MILLIS) + 1)  + ELECTION_TIMEOUT_MIN_MILLIS;
-        electionTimeoutTimer.schedule(new ElectionTimeoutTask(this), electionTimeoutMillis);
-        electionTimeoutTimerActive = true;
-    }
-
-    // Stop leader heartbeats timer.
-    public void stopLeaderHeartbeatsTimer() {
-        if (leaderHeartbeatsTimerActive) {
-            if (leaderHeartbeatsTask != null) { 
-                leaderHeartbeatsTask.cancel();
-            }
-            if (leaderHeartbeatsTimer != null) {
-                leaderHeartbeatsTimer.cancel();
-            }
-        }
-        leaderHeartbeatsTimerActive = false;
     }
 
     // Start leader heartbeats timer.
-    public void startLeaderHeartbeatsTimer() {
-        stopLeaderHeartbeatsTimer();
+    public void startHeartbeatsTimer() {
         leaderHeartbeatsTimer = new Timer();
-        leaderHeartbeatsTimer.schedule(new LeaderHeartbeatsTask(this), 0, LEADER_HEARTBEATS_TIMER_MILLIS);
-        leaderHeartbeatsTimerActive = true;
+        leaderHeartbeatsTimer.schedule(new HeartbeatsTask(this), 0, LEADER_HEARTBEATS_TIMER_MILLIS);
     }
+
+    // Stop leader heartbeats timer.
+    public void stopHeartbeatsTimer() {
+        if (leaderHeartbeatsTask != null) { 
+            leaderHeartbeatsTask.cancel();
+        }
+        if (leaderHeartbeatsTimer != null) {
+            leaderHeartbeatsTimer.cancel();
+        }
+    }
+
    
     public void init() throws MalformedURLException, RemoteException, NotBoundException {
 
-        // Number of servers that make up the simple majority.
-        numSimpleMajority = cfg.getNumServers() / 2 + 1;
+        // Number of servers that make up the majority.
+        numMajority = cfg.getNumServers() / 2 + 1;
 
         Naming.rebind("//" + cfg.getInfoById(id).getHostname() + "/" + id, this);
         log("Server started.");
@@ -224,8 +193,8 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
             @Override
             public void run() {
                 try {
-                    stopElectionTimeoutTimer();
-                    stopLeaderHeartbeatsTimer();
+                    stopElectionTimer();
+                    stopHeartbeatsTimer();
                 } catch (Exception ex) {
                     log("Handle shutdown.", ex);
                 }
@@ -233,16 +202,17 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         });
     }
 
-    public static void main(String[] args) throws MalformedURLException, RemoteException, NotBoundException {
+    public static void main(String[] args) throws IOException, MalformedURLException, RemoteException, NotBoundException {
         if (args.length != 1) {
             System.out.println("Usage: RaftServer <id>");
             return;
         }
         Long initId = Long.parseLong(args[0]);
         RaftServersCfg initCfg = new RaftServersCfg("servers.cfg");
+        RaftServerDb initDb = new RaftServerDb(initId);
         try {
             String hostname = initCfg.getInfoById(initId).getHostname();
-            RaftServer server = new RaftServer(initId, initCfg);
+            RaftServer server = new RaftServer(initId, initCfg, initDb);
             server.init();
         } catch (Exception ex) {
             StringWriter sw = new StringWriter();
@@ -256,51 +226,64 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
       idToServerStateMap.put(id, true);
       if (cfg.getNumServers() - 1 == idToServerStateMap.size()) {
         clusterFormed = true;
-        log("Cluster is formed. I am a " + serverState + ". Time: " + System.currentTimeMillis());
-        startElectionTimeoutTimer();
+        log("Cluster is formed. I am a " + serverState + ".");
+        startElectionTimer();
+        startHeartbeatsTimer();
       }
     }
 
+
     @Override
-    public RaftRequestVoteResult requestVote(Long term, Long candidateId, Long lastLogIndex, Long lastLogTerm) throws RemoteException {
-        boolean voteGranted = false;
+    public RaftRequestVoteResult requestVote(Long term, Long candidateId, Long lastLogIndex, Long lastLogTerm) throws RemoteException, IOException {
         if (clusterFormed) {
-            if (term < currentTerm) {
-                voteGranted = false;
-            } else {
-                if ((votedFor == null || votedFor == candidateId) && (lastLogIndex >= 0)) {
-                    // candidate's log is at least as up-to-date as receiver's log
-                    voteGranted = true;
+            synchronized (lock) {
+                long currentTerm = db.readCurrentTerm().get();
+                if (term > currentTerm) {
+                    db.writeCurrentTerm(new AtomicLong(term));
+                    db.writeVotedFor(null);
+                    serverState = RaftServerState.FOLLOWER;
                 }
             }
+            long currentTerm;
+            AtomicLong votedFor = null;
+            boolean voteGranted = false;
+            synchronized (lock) {
+                 currentTerm = db.readCurrentTerm().get();
+                 votedFor = db.readVotedFor();
+                if (term == currentTerm && (votedFor == null || votedFor.get() == candidateId)) {
+                    voteGranted = true;
+                    db.writeVotedFor(new AtomicLong(candidateId));
+                    hadLeaderActivity.set(true);
+                }
+            } 
+            log("Received requestVote. Term=" + term + "; candidateId=" + candidateId + "; lastLogIndex=" + lastLogIndex + "; lastLogTerm=" + lastLogTerm + "; voteGranted=" + voteGranted);
+            return new RaftRequestVoteResult(currentTerm, voteGranted);
         }
-        log("Received requestVote. Term=" + term + "; candidateId=" + candidateId + "; lastLogIndex=" + lastLogIndex + "; lastLogTerm=" + lastLogTerm + "; voteGranted=" + voteGranted + "; Time=" + System.currentTimeMillis());
-        return new RaftRequestVoteResult(currentTerm, voteGranted);
+        return new RaftRequestVoteResult(db.readCurrentTerm().get(), false);
     }
 
     @Override
-    public RaftAppendEntriesResult appendEntries(Long term, Long leaderId, Long prevLogIndex, RaftEntry[] entries, Long leaderCommit) throws RemoteException {
-      if (clusterFormed) {
-         if (entries.length == 0) {
-             switch (serverState) {
-                 case FOLLOWER: 
-                     startElectionTimeoutTimer();
-                     lastKnownLeaderId = leaderId;
-                     break;
-                 case CANDIDATE:
-                     setServerStateTo(RaftServerState.FOLLOWER);
-                     lastKnownLeaderId = leaderId;
-                     break;
-                 case LEADER:
-                     if (term >= currentTerm) {
-                        setServerStateTo(RaftServerState.FOLLOWER);
-                        lastKnownLeaderId = leaderId;
-                     }
-                     break;
-             } 
-         }
-      }
-      return null;
+    public RaftAppendEntriesResult appendEntries(Long term, Long leaderId, Long prevLogIndex, RaftEntry[] entries, Long leaderCommit) throws RemoteException, IOException {
+        if (clusterFormed) {
+            synchronized (lock) {
+                long currentTerm = db.readCurrentTerm().get();
+                if (term > currentTerm) {
+                    db.writeCurrentTerm(new AtomicLong(term));
+                    db.writeVotedFor(null);
+                    serverState = RaftServerState.FOLLOWER;
+                }
+            }
+            boolean success = false;
+            long currentTerm;
+            synchronized (lock) {
+                currentTerm = db.readCurrentTerm().get();
+                if (term < currentTerm) {
+                    success = false;
+                }
+            }
+            return new RaftAppendEntriesResult(currentTerm, success);
+        } 
+        return new RaftAppendEntriesResult(db.readCurrentTerm().get(), false);
     }
 
     @Override
