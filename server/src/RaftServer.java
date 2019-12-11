@@ -33,14 +33,8 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     private RaftServerDb db;
 
     private Long id;
-    private AtomicInteger numVotes = new AtomicInteger(0);
-    private int numMajority;
 
     private AtomicBoolean hadLeaderActivity = new AtomicBoolean(false);
-
-    
-    private Long lastKnownLeaderId = null;
-
 
     private Map<Long, Boolean> idToServerStateMap = new TreeMap<>();
     private Map<Long, RaftRMIInterface> idToServerInterfaceMap = new TreeMap<>();
@@ -75,11 +69,6 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         return cfg;
     }
 
-    // Get number of votes this server has. 
-    public AtomicInteger getNumVotes() {  
-        return numVotes;
-    }
-
     // Get current server state.
     public RaftServerState getServerState() {
         return serverState;
@@ -96,13 +85,8 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         return idToServerInterfaceMap.get(serverId);
     }
 
-    // Get number of majority.
-    public int getNumMajority() {
-        return numMajority;
-    }
-
     // Get whether had leader activity.
-    public AtomicBoolean hadLeaderActivity() {
+    public AtomicBoolean getHadLeaderActivity() {
         return hadLeaderActivity;
     }
 
@@ -115,7 +99,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     public void startElectionTimer() {
         electionTimer = new Timer();
         int electionTimerMillis = new Random().nextInt((ELECTION_TIMER_MAX_MILLIS - ELECTION_TIMER_MIN_MILLIS) + 1)  + ELECTION_TIMER_MIN_MILLIS;
-        electionTimer.schedule(new ElectionTask(this), electionTimerMillis);
+        electionTimer.schedule(new ElectionTask(this), electionTimerMillis, electionTimerMillis);
     }
 
     // Stop election timer.
@@ -131,7 +115,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     // Start leader heartbeats timer.
     public void startHeartbeatsTimer() {
         leaderHeartbeatsTimer = new Timer();
-        leaderHeartbeatsTimer.schedule(new HeartbeatsTask(this), 0, LEADER_HEARTBEATS_TIMER_MILLIS);
+        leaderHeartbeatsTimer.schedule(new HeartbeatsTask(this), LEADER_HEARTBEATS_TIMER_MILLIS, LEADER_HEARTBEATS_TIMER_MILLIS);
     }
 
     // Stop leader heartbeats timer.
@@ -146,9 +130,6 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
    
     public void init() throws MalformedURLException, RemoteException, NotBoundException {
-
-        // Number of servers that make up the majority.
-        numMajority = cfg.getNumServers() / 2 + 1;
 
         Naming.rebind("//" + cfg.getInfoById(id).getHostname() + "/" + id, this);
         log("Server started.");
@@ -279,12 +260,15 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
                     serverState = RaftServerState.FOLLOWER;
                 }
             }
-            boolean success = false;
             long currentTerm;
+            boolean success = false;
             synchronized (lock) {
                 currentTerm = db.readCurrentTerm().get();
                 if (term < currentTerm) {
                     success = false;
+                } else {
+                    success = true;
+                    db.writeVotedFor(new AtomicLong(leaderId));
                 }
             }
             hadLeaderActivity.set(true);
@@ -294,12 +278,13 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     }
 
     @Override
-    public RaftCmdResult processCmd(String cmd) throws RemoteException {
+    public RaftCmdResult processCmd(String cmd) throws RemoteException, IOException {
       log("Processing cmd " + cmd);
       if (serverState == RaftServerState.LEADER) {
         log("I am the leader. Processing cmd " + cmd);
         return new RaftCmdResult(true, id, "Command processed.");
       } else {
+        long lastKnownLeaderId = db.readVotedFor().get();
         log("I am not the leader. Last known leader is " + lastKnownLeaderId);
         return new RaftCmdResult(false, lastKnownLeaderId, null);
       }

@@ -1,3 +1,4 @@
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.TimerTask;
 
@@ -13,26 +14,40 @@ public class ElectionTask extends TimerTask {
     @Override
     public void run() {
         try {
-            server.startElectionTimer();
-            boolean hadLeaderActivity = server.hadLeaderActivity().get();
-            server.hadLeaderActivity().set(false);
-            if (server.getServerState() == RaftServerState.LEADER) { return; }
-            if (hadLeaderActivity) {  return; }
-            synchronized (server.getLock()) {
-                long currentTerm = server.getDb().readCurrentTerm().incrementAndGet();
-                server.getDb().writeCurrentTerm(new AtomicLong(currentTerm));
-                server.setServerState(RaftServerState.CANDIDATE);
-                server.getDb().writeVotedFor(new AtomicLong(server.getId()));
-                server.getNumVotes().incrementAndGet();
+            if (server.getHadLeaderActivity().getAndSet(false)) {
+                return;
             }
-            server.log("Voted for self."); 
+            long currentTerm;
+            synchronized (server.getLock()) {
+                if (server.getServerState() == RaftServerState.LEADER) {
+                    return;
+                }
+                currentTerm = server.getDb().readCurrentTerm().get() + 1;
+                server.getDb().writeCurrentTerm(new AtomicLong(currentTerm));
+                server.getDb().writeVotedFor(new AtomicLong(server.getId()));
+                server.setServerState(RaftServerState.CANDIDATE);
+                server.log("Voted for self."); 
+            }
+            AtomicInteger numVotes = new AtomicInteger(0);
+            int numMajority = (server.getCfg().getNumServers() + 1) / 2;
             for (Long serverId : server.getCfg().getInfos().keySet()) {
                 if (serverId != server.getId()) {
                     RaftRMIInterface serverInterface = server.getServerInterface(serverId);
                     try {
                         RaftRequestVoteResult result = serverInterface.requestVote(server.getDb().readCurrentTerm().get(), server.getId(), 0L, 0L);
-                        if (result.getVoteGranted()) {
-                            if (server.getNumVotes().incrementAndGet() == server.getNumMajority()) {
+                        if (!result.getVoteGranted() || result.getTerm() != currentTerm) {
+                            if (currentTerm > server.getDb().readCurrentTerm().get()) {
+                                server.getDb().writeCurrentTerm(new AtomicLong(currentTerm));
+                                server.getDb().writeVotedFor(null);
+                                server.setServerState(RaftServerState.FOLLOWER);
+                            }
+                            return;
+                        }         
+                        if (numVotes.incrementAndGet() == numMajority) {
+                            synchronized (server.getLock()) {
+                                if (server.getServerState() != RaftServerState.CANDIDATE || server.getDb().readCurrentTerm().get() != currentTerm) {
+                                    return;
+                                }
                                 server.setServerState(RaftServerState.LEADER);
                             }
                         }
