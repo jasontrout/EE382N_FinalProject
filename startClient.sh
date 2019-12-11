@@ -6,11 +6,9 @@ javac -d client/dist client/src/*.java
 
 jar -cvfm client/dist/RaftClient.jar client/manifest.txt -C client/dist/ .
 
-if pgrep -x rmiregistry >/dev/null
+if ! pgrep -x rmiregistry >/dev/null
 then
-    echo "rmiregistry is running."
-else
-    echo "Please execute ./runServers.sh first."
+    echo "rmiregistry is not running. Run ./startRmiRegistry.sh."
     exit 0
 fi
 

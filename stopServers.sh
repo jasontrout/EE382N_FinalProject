@@ -1,3 +1,3 @@
 #!/bin/bash
 
-pkill -f RaftServer
+pkill -f RaftServer.jar

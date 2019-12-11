@@ -14,12 +14,13 @@ public class ElectionTask extends TimerTask {
     @Override
     public void run() {
         try {
-            if (server.getHadLeaderActivity().getAndSet(false)) {
-                return;
-            }
             long currentTerm;
             synchronized (server.getLock()) {
+                if (server.getHadLeaderActivity().getAndSet(false)) {
+                    return;
+                }
                 if (server.getServerState() == RaftServerState.LEADER) {
+                    server.getHadLeaderActivity().set(true);
                     return;
                 }
                 currentTerm = server.getDb().readCurrentTerm().get() + 1;
@@ -35,15 +36,14 @@ public class ElectionTask extends TimerTask {
                     RaftRMIInterface serverInterface = server.getServerInterface(serverId);
                     try {
                         RaftRequestVoteResult result = serverInterface.requestVote(server.getDb().readCurrentTerm().get(), server.getId(), 0L, 0L);
-                        if (!result.getVoteGranted() || result.getTerm() != currentTerm) {
-                            if (currentTerm > server.getDb().readCurrentTerm().get()) {
-                                server.getDb().writeCurrentTerm(new AtomicLong(currentTerm));
-                                server.getDb().writeVotedFor(null);
-                                server.setServerState(RaftServerState.FOLLOWER);
-                            }
+                        if (result.getTerm() > currentTerm) {
+                            server.getDb().writeCurrentTerm(new AtomicLong(result.getTerm()));
+                            server.getDb().writeVotedFor(null);
+                            server.setServerState(RaftServerState.FOLLOWER); 
+                            server.getHadLeaderActivity().set(true);
                             return;
                         }         
-                        if (numVotes.incrementAndGet() == numMajority) {
+                        if (result.getVoteGranted() && numVotes.incrementAndGet() == numMajority) {
                             synchronized (server.getLock()) {
                                 if (server.getServerState() != RaftServerState.CANDIDATE || server.getDb().readCurrentTerm().get() != currentTerm) {
                                     return;

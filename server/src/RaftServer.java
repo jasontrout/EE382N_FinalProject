@@ -7,6 +7,10 @@ import java.rmi.Naming;
 import java.rmi.NotBoundException;
 import java.rmi.RemoteException;
 import java.rmi.server.UnicastRemoteObject;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -22,10 +26,12 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     private static final long serialVersionUID = 1L;
 
-    private static final int ELECTION_TIMER_MIN_MILLIS = 1500; // Make 1.5s due to logging.
-    private static final int ELECTION_TIMER_MAX_MILLIS = 3000; // Make 3.0s due to logging.
+    private static final int READY_SCHEDULE_DELAY_MILLIS = 5;
 
-    private static final int LEADER_HEARTBEATS_TIMER_MILLIS = 500; // Make 0.5s due to logging.
+    private static final int ELECTION_SCHEDULE_DELAY_MIN_MILLIS = 1800; // Should be 150ms, but using 1s for the demo.
+    private static final int ELECTION_SCHEDULE_DELAY_MAX_MILLIS = 4000; // Should be 300ms, but using 3s for the demo.
+
+    private static final int HEARTBEATS_SCHEDULE_DELAY_MILLIS = 600;
 
     private Object lock = new Object();
 
@@ -38,20 +44,116 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     private Map<Long, Boolean> idToServerStateMap = new TreeMap<>();
     private Map<Long, RaftRMIInterface> idToServerInterfaceMap = new TreeMap<>();
-    private boolean clusterFormed = false;
     private RaftServerState serverState = RaftServerState.FOLLOWER;
 
-    private Timer electionTimer;
+    private ScheduledExecutorService readyScheduler = Executors.newScheduledThreadPool(1);
+    private ScheduledFuture<?> readyFuture;
+    private TimerTask readyTask;
+
+    private ScheduledExecutorService electionScheduler = Executors.newScheduledThreadPool(1);
+    private ScheduledFuture<?> electionFuture;
     private ElectionTask electionTask;
 
-    private Timer leaderHeartbeatsTimer;
-    private HeartbeatsTask leaderHeartbeatsTask;
+    private ScheduledExecutorService heartbeatsScheduler = Executors.newScheduledThreadPool(1);
+    private ScheduledFuture<?> heartbeatsFuture;
+    private HeartbeatsTask hearbeatsTask;
+
+
+    private boolean clusterFormed = false;
+    private boolean serverAddedToOtherServers = false;
 
     protected RaftServer(Long id, RaftServersCfg cfg, RaftServerDb db) throws RemoteException, IOException {
         super();
         this.id = id;
         this.cfg = cfg;
         this.db = db;
+
+        log("Server started.");
+
+        readyFuture = readyScheduler.scheduleAtFixedRate(new TimerTask() { 
+            @Override
+            public void run() {
+                if (clusterFormed && serverAddedToOtherServers) {
+                    log("Cluster is formed. I am a " + serverState + ".");
+
+                    int electionScheduleDelayMillis = new Random().nextInt((ELECTION_SCHEDULE_DELAY_MAX_MILLIS - ELECTION_SCHEDULE_DELAY_MIN_MILLIS) + 1)  + ELECTION_SCHEDULE_DELAY_MIN_MILLIS;
+                    electionFuture = electionScheduler.scheduleAtFixedRate(new ElectionTask(RaftServer.this), electionScheduleDelayMillis, electionScheduleDelayMillis, TimeUnit.MILLISECONDS);
+
+                    heartbeatsFuture = heartbeatsScheduler.scheduleAtFixedRate(new HeartbeatsTask(RaftServer.this), 0, HEARTBEATS_SCHEDULE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
+
+                    readyFuture.cancel(true);
+                    readyScheduler.shutdown();
+                }
+            }
+        }, 0, READY_SCHEDULE_DELAY_MILLIS, TimeUnit.MILLISECONDS);
+
+        Timer timer = new Timer();
+        timer.schedule(new TimerTask() {
+            @Override
+            public void run() { 
+
+		// Add server interfaces to the other servers.
+		Set<Long> serverInterfacesToAddSet = new TreeSet<>();
+		for (Long serverId : cfg.getInfos().keySet()) {
+		    serverInterfacesToAddSet.add(serverId);
+		}
+		Set<Long> serverInterfacesAddedSet = new TreeSet<>();
+		while (serverInterfacesToAddSet.size() > 0) {
+		    for (Long serverId : serverInterfacesToAddSet) {
+			try {
+			    RaftRMIInterface serverInterface = (RaftRMIInterface)Naming.lookup("//" + cfg.getInfoById(serverId).getHostname() + "/" + serverId);
+			    idToServerInterfaceMap.put(serverId, serverInterface);
+			    serverInterfacesAddedSet.add(serverId);
+			} catch (Exception ex) {
+			    // Could not add server interface. Keeping trying.
+			}
+		    }
+		    for (Long serverId : serverInterfacesAddedSet) {
+		      serverInterfacesToAddSet.remove(serverId);
+		    }
+		} 
+
+		// Form cluster.
+		Set<Long> serversToAddToSet = new TreeSet<>();
+		for (Long serverId : cfg.getInfos().keySet()) {
+		    if (serverId != id) {
+			serversToAddToSet.add(serverId);
+		    }
+		}
+		Set<Long> serversAddedSet = new TreeSet<>();
+		while (serversToAddToSet.size() > 0) {
+		    for (Long serverId : serversToAddToSet) {
+			try {
+			    idToServerInterfaceMap.get(serverId).addServerToCluster(id);
+			    serversAddedSet.add(serverId);
+			} catch (Exception ex) {
+			    // Could not add server interface. Keeping trying.
+			}
+		    }
+		    for (Long serverId : serversAddedSet) {
+		      serversToAddToSet.remove(serverId);
+		    }
+		}
+		serverAddedToOtherServers = true;
+           }
+        }, 5);
+       
+
+      
+        // Handle shutdown.
+        Runtime.getRuntime().addShutdownHook(new Thread() {
+            @Override
+            public void run() {
+                try {
+                    electionFuture.cancel(true);
+                    electionScheduler.shutdown();
+                    heartbeatsFuture.cancel(true);
+                    heartbeatsScheduler.shutdown();
+                } catch (Exception ex) {
+                    log("Handle shutdown.", ex);
+                }
+          }
+        });
     }
 
     // Get current server Id.
@@ -95,100 +197,8 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         return lock; 
     } 
 
-    // Start election timer.
-    public void startElectionTimer() {
-        electionTimer = new Timer();
-        int electionTimerMillis = new Random().nextInt((ELECTION_TIMER_MAX_MILLIS - ELECTION_TIMER_MIN_MILLIS) + 1)  + ELECTION_TIMER_MIN_MILLIS;
-        electionTimer.schedule(new ElectionTask(this), electionTimerMillis, electionTimerMillis);
-    }
-
-    // Stop election timer.
-    public void stopElectionTimer() {
-        if (electionTask != null) {
-            electionTask.cancel();
-        }
-        if (electionTimer != null) {
-            electionTimer.cancel();
-        }
-    }
-
-    // Start leader heartbeats timer.
-    public void startHeartbeatsTimer() {
-        leaderHeartbeatsTimer = new Timer();
-        leaderHeartbeatsTimer.schedule(new HeartbeatsTask(this), LEADER_HEARTBEATS_TIMER_MILLIS, LEADER_HEARTBEATS_TIMER_MILLIS);
-    }
-
-    // Stop leader heartbeats timer.
-    public void stopHeartbeatsTimer() {
-        if (leaderHeartbeatsTask != null) { 
-            leaderHeartbeatsTask.cancel();
-        }
-        if (leaderHeartbeatsTimer != null) {
-            leaderHeartbeatsTimer.cancel();
-        }
-    }
 
    
-    public void init() throws MalformedURLException, RemoteException, NotBoundException {
-
-        Naming.rebind("//" + cfg.getInfoById(id).getHostname() + "/" + id, this);
-        log("Server started.");
-
-        // Add server interfaces to the other servers.
-        Set<Long> serverInterfacesToAddSet = new TreeSet<>();
-        for (Long serverId : cfg.getInfos().keySet()) {
-            serverInterfacesToAddSet.add(serverId);
-        }
-        Set<Long> serverInterfacesAddedSet = new TreeSet<>();
-        while (serverInterfacesToAddSet.size() > 0) {
-            for (Long serverId : serverInterfacesToAddSet) {
-                try {
-                    RaftRMIInterface serverInterface = (RaftRMIInterface)Naming.lookup("//" + cfg.getInfoById(serverId).getHostname() + "/" + serverId);
-                    idToServerInterfaceMap.put(serverId, serverInterface);
-                    serverInterfacesAddedSet.add(serverId);
-                } catch (Exception ex) {
-                    // Could not add server interface. Keeping trying.
-                }
-            }
-            for (Long serverId : serverInterfacesAddedSet) {
-              serverInterfacesToAddSet.remove(serverId);
-            }
-        } 
-
-        // Form cluster.
-        Set<Long> serversToAddToSet = new TreeSet<>();
-        for (Long serverId : cfg.getInfos().keySet()) {
-            serversToAddToSet.add(serverId);
-        }
-        Set<Long> serversAddedSet = new TreeSet<>();
-        while (serversToAddToSet.size() > 0) {
-            for (Long serverId : serversToAddToSet) {
-                try {
-                    idToServerInterfaceMap.get(serverId).addServerToCluster(id);
-                    serversAddedSet.add(serverId);
-                } catch (Exception ex) {
-                    // Could not add server interface. Keeping trying.
-                }
-            }
-            for (Long serverId : serversAddedSet) {
-              serversToAddToSet.remove(serverId);
-            }
-        } 
-      
-        // Handle shutdown.
-        Runtime.getRuntime().addShutdownHook(new Thread() {
-            @Override
-            public void run() {
-                try {
-                    stopElectionTimer();
-                    stopHeartbeatsTimer();
-                } catch (Exception ex) {
-                    log("Handle shutdown.", ex);
-                }
-          }
-        });
-    }
-
     public static void main(String[] args) throws IOException, MalformedURLException, RemoteException, NotBoundException {
         if (args.length != 1) {
             System.out.println("Usage: RaftServer <id>");
@@ -200,7 +210,8 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         try {
             String hostname = initCfg.getInfoById(initId).getHostname();
             RaftServer server = new RaftServer(initId, initCfg, initDb);
-            server.init();
+            String bindStr = "//" + initCfg.getInfoById(initId).getHostname() + "/" + initId;
+            Naming.rebind(bindStr, server);
         } catch (Exception ex) {
             StringWriter sw = new StringWriter();
             ex.printStackTrace(new PrintWriter(sw));
@@ -213,68 +224,60 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
       idToServerStateMap.put(id, true);
       if (cfg.getNumServers() - 1 == idToServerStateMap.size()) {
         clusterFormed = true;
-        log("Cluster is formed. I am a " + serverState + ".");
-        startElectionTimer();
-        startHeartbeatsTimer();
       }
     }
 
-
     @Override
     public RaftRequestVoteResult requestVote(Long term, Long candidateId, Long lastLogIndex, Long lastLogTerm) throws RemoteException, IOException {
-        if (clusterFormed) {
-            synchronized (lock) {
-                long currentTerm = db.readCurrentTerm().get();
-                if (term > currentTerm) {
-                    db.writeCurrentTerm(new AtomicLong(term));
-                    db.writeVotedFor(null);
-                    serverState = RaftServerState.FOLLOWER;
-                }
+        long currentTerm = db.readCurrentTerm().get();
+        boolean voteGranted = false;
+        String votedForStr = "";
+        synchronized (lock) {
+            if (term > currentTerm) {
+                db.writeCurrentTerm(new AtomicLong(term));
+                currentTerm = db.readCurrentTerm().get();
+                db.writeVotedFor(null);
+                setServerState(RaftServerState.FOLLOWER);
+                hadLeaderActivity.set(true);
             }
-            long currentTerm;
-            AtomicLong votedFor = null;
-            boolean voteGranted = false;
-            synchronized (lock) {
-                 currentTerm = db.readCurrentTerm().get();
-                 votedFor = db.readVotedFor();
-                if (term == currentTerm && (votedFor == null || votedFor.get() == candidateId)) {
-                    voteGranted = true;
-                    db.writeVotedFor(new AtomicLong(candidateId));
-                    hadLeaderActivity.set(true);
-                }
-            } 
-            log("Received requestVote. Term=" + term + "; candidateId=" + candidateId + "; lastLogIndex=" + lastLogIndex + "; lastLogTerm=" + lastLogTerm + "; voteGranted=" + voteGranted);
-            return new RaftRequestVoteResult(currentTerm, voteGranted);
+            AtomicLong votedFor = db.readVotedFor();
+            if (term < currentTerm) {
+                 voteGranted = false;
+            } else {
+                 if (votedFor == null || votedFor.get() == candidateId) {
+                     voteGranted = true;
+                     votedFor = new AtomicLong(candidateId);
+                     db.writeVotedFor(new AtomicLong(candidateId));
+                 }
+            }
+            votedForStr = (votedFor == null) ? "null" : votedFor.toString();
         }
-        return new RaftRequestVoteResult(db.readCurrentTerm().get(), false);
+        log("RequestVote. Term=" + term + "; currentTerm=" + currentTerm + "; candidateId=" + candidateId + "; lastLogIndex=" + lastLogIndex + "; lastLogTerm=" + lastLogTerm + "; votedFor=" + votedForStr + "; voteGranted=" + voteGranted);
+        return new RaftRequestVoteResult(currentTerm, voteGranted);
     }
 
     @Override
     public RaftAppendEntriesResult appendEntries(Long term, Long leaderId, Long prevLogIndex, RaftEntry[] entries, Long leaderCommit) throws RemoteException, IOException {
-        if (clusterFormed) {
-            synchronized (lock) {
-                long currentTerm = db.readCurrentTerm().get();
-                if (term > currentTerm) {
-                    db.writeCurrentTerm(new AtomicLong(term));
-                    db.writeVotedFor(null);
-                    serverState = RaftServerState.FOLLOWER;
-                }
-            }
-            long currentTerm;
-            boolean success = false;
-            synchronized (lock) {
+        long currentTerm = db.readCurrentTerm().get();
+        boolean success = false;
+        synchronized (lock) {
+            if (term > currentTerm) {
+                db.writeCurrentTerm(new AtomicLong(term));
                 currentTerm = db.readCurrentTerm().get();
-                if (term < currentTerm) {
-                    success = false;
-                } else {
-                    success = true;
-                    db.writeVotedFor(new AtomicLong(leaderId));
-                }
+                setServerState(RaftServerState.FOLLOWER);
+                hadLeaderActivity.set(true);
             }
-            hadLeaderActivity.set(true);
-            return new RaftAppendEntriesResult(currentTerm, success);
-        } 
-        return new RaftAppendEntriesResult(db.readCurrentTerm().get(), false);
+            if (term == currentTerm) {
+                db.writeVotedFor(new AtomicLong(leaderId));
+                hadLeaderActivity.set(true);
+            }
+            if (term < currentTerm) {
+                success = false;
+            } else {
+                success = true;
+            }
+        }
+        return new RaftAppendEntriesResult(currentTerm, success);
     }
 
     @Override

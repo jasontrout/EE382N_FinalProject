@@ -27,15 +27,14 @@ public class HeartbeatsTask extends TimerTask {
                     try {   
                         RaftAppendEntriesResult result = serverInterface.appendEntries(server.getDb().readCurrentTerm().get(), server.getId(), 0L, new RaftEntry[0], 0L);
                         if (result.getTerm() != currentTerm) {
-                            synchronized (server.getLock()) {
-                                if (currentTerm > server.getDb().readCurrentTerm().get()) {
-                                    server.getDb().writeCurrentTerm(new AtomicLong(currentTerm));
-                                    server.getDb().writeVotedFor(null);
-                                    server.setServerState(RaftServerState.FOLLOWER);
-                                }
+                            if (result.getTerm() > currentTerm) {
+                                server.getDb().writeCurrentTerm(new AtomicLong(result.getTerm()));
+                                server.getDb().writeVotedFor(null);
+                                server.setServerState(RaftServerState.FOLLOWER); 
+                                server.getHadLeaderActivity().set(true);
                             }
                             return;
-                        }
+                        }         
                         synchronized (server.getLock()) {
                             if (server.getServerState() != RaftServerState.LEADER) {
                                 return;
