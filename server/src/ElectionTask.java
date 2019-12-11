@@ -13,12 +13,14 @@ public class ElectionTask extends TimerTask {
     @Override
     public void run() {
         try {
-            if (server.getServerState() == RaftServerState.LEADER) {
-                return;
-            }
+            server.startElectionTimer();
+            boolean hadLeaderActivity = server.hadLeaderActivity().get();
+            server.hadLeaderActivity().set(false);
+            if (server.getServerState() == RaftServerState.LEADER) { return; }
+            if (hadLeaderActivity) {  return; }
             synchronized (server.getLock()) {
-                AtomicLong currentTerm = server.getDb().readCurrentTerm();
-                server.getDb().writeCurrentTerm(currentTerm);
+                long currentTerm = server.getDb().readCurrentTerm().incrementAndGet();
+                server.getDb().writeCurrentTerm(new AtomicLong(currentTerm));
                 server.setServerState(RaftServerState.CANDIDATE);
                 server.getDb().writeVotedFor(new AtomicLong(server.getId()));
                 server.getNumVotes().incrementAndGet();

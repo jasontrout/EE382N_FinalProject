@@ -88,6 +88,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     // Set current server state.
     public void setServerState(RaftServerState serverState) {
         this.serverState = serverState; 
+        log("I am a " + this.serverState);
     }
   
     // Get server interface by ID.
@@ -98,6 +99,11 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     // Get number of majority.
     public int getNumMajority() {
         return numMajority;
+    }
+
+    // Get whether had leader activity.
+    public AtomicBoolean hadLeaderActivity() {
+        return hadLeaderActivity;
     }
 
     // Get lock.
@@ -281,6 +287,7 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
                     success = false;
                 }
             }
+            hadLeaderActivity.set(true);
             return new RaftAppendEntriesResult(currentTerm, success);
         } 
         return new RaftAppendEntriesResult(db.readCurrentTerm().get(), false);
