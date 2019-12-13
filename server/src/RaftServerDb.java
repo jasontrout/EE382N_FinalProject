@@ -3,6 +3,7 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.PrintWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.nio.file.Files;
@@ -128,9 +129,9 @@ public class RaftServerDb {
         RaftEntry entry = null;
         Path path = Paths.get(logsDbFilePath);
         long lineCount = Files.lines(path).count();
-        if (index < lineCount) {
+        if (index <= lineCount) {
             BufferedReader reader;
-            long currentIndex = 0;
+            long currentIndex = 1;
             reader = new BufferedReader(new FileReader(logsDbFilePath));
             String line = reader.readLine();
             while (line != null) {
@@ -150,13 +151,20 @@ public class RaftServerDb {
         return entry;
     }
 
-    public synchronized RaftEntry[] readEntries(long startIndex) throws IOException {
+    public synchronized RaftEntry readLastEntry() throws IOException {
+        RaftEntry entry = null;
+        Path path = Paths.get(logsDbFilePath);
+        long lineCount = Files.lines(path).count();
+        return readEntry(lineCount);
+    }
+
+    public synchronized List<RaftEntry> readEntries(long startIndex) throws IOException {
         List<RaftEntry> entries = new ArrayList<>();
         Path path = Paths.get(logsDbFilePath);
         long lineCount = Files.lines(path).count();
         if (startIndex < lineCount) {
             BufferedReader reader;
-            long currentIndex = 0;
+            long currentIndex = 1;
             reader = new BufferedReader(new FileReader(logsDbFilePath));
             String line = reader.readLine();
             while (line != null) {
@@ -172,6 +180,39 @@ public class RaftServerDb {
             }
             reader.close();
         }
-        return entries.toArray(new RaftEntry[entries.size()]);
+        return entries;
     }
+
+    public synchronized void removeEntries(long startIndex) throws IOException {
+        List<RaftEntry> entries = new ArrayList<>();
+        Path path = Paths.get(logsDbFilePath);
+        long lineCount = Files.lines(path).count();
+        if (startIndex < lineCount) {
+            BufferedReader reader;
+            long currentIndex = 1;
+            reader = new BufferedReader(new FileReader(logsDbFilePath));
+            String line = reader.readLine();
+            while (line != null) {
+                if (currentIndex < startIndex) {
+                    String[] tokens = line.split("#");
+                    long index = Long.parseLong(tokens[0]);
+                    long term = Long.parseLong(tokens[1]);
+                    String command = tokens[2];
+                    entries.add(new RaftEntry(index, term, command));
+                }
+                if (currentIndex == startIndex) {
+                    break;
+                } 
+                line = reader.readLine();
+                currentIndex++;
+            }
+            reader.close();
+        }
+        PrintWriter pw = new PrintWriter(logsDbFilePath);
+        pw.close();
+        for (RaftEntry entry : entries) {
+            writeEntry(entry);
+        }
+    }
+
 }

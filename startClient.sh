@@ -8,7 +8,7 @@ jar -cvfm client/dist/RaftClient.jar client/manifest.txt -C client/dist/ .
 
 if ! pgrep -x rmiregistry >/dev/null
 then
-    echo "rmiregistry is not running. Run ./startRmiRegistry.sh."
+    echo "Server cluster is not running. Run ./startServers.sh."
     exit 0
 fi
 

@@ -28,45 +28,88 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     private static final int READY_SCHEDULE_DELAY_MILLIS = 5;
 
-    private static final int ELECTION_SCHEDULE_DELAY_MIN_MILLIS = 1800; // Should be 150ms, but using 1s for the demo.
-    private static final int ELECTION_SCHEDULE_DELAY_MAX_MILLIS = 4000; // Should be 300ms, but using 3s for the demo.
+    private static final int ELECTION_SCHEDULE_DELAY_MIN_MILLIS = 1800; // Should be 150ms, but using 1.8s for the demo.
+    private static final int ELECTION_SCHEDULE_DELAY_MAX_MILLIS = 4000; // Should be 300ms, but using 4s for the demo.
 
-    private static final int HEARTBEATS_SCHEDULE_DELAY_MILLIS = 600;
+    private static final int HEARTBEATS_SCHEDULE_DELAY_MILLIS = 600; // Should be 50ms, but using 600ms for the demo.
 
     private Object lock = new Object();
 
+    // Used for server configurations.
     private RaftServersCfg cfg;
+
+    // Used for persistent storage (currentTerm, votedFor, logs).
     private RaftServerDb db;
 
+    // Index of highest log entry known to be committed. 
+    private long commitIndex = 0;
+
+    // Index of highest log entry applied to state machine.
+    private long lastApplied = 0;
+
+    // Server ID.
     private Long id;
 
-    private AtomicBoolean hadLeaderActivity = new AtomicBoolean(false);
-
-    private Map<Long, Boolean> idToServerStateMap = new TreeMap<>();
-    private Map<Long, RaftRMIInterface> idToServerInterfaceMap = new TreeMap<>();
+    // Server State (FOLLOWER, CANDIDATE, LEADER).
     private RaftServerState serverState = RaftServerState.FOLLOWER;
 
+    // Stores whether leader activity has been detected.
+    private AtomicBoolean hadLeaderActivity = new AtomicBoolean(false);
+
+    // Maps of server ID to server objects.
+    private Map<Long, Boolean> idToServerStateMap = new TreeMap<>();
+    private Map<Long, RaftRMIInterface> idToServerInterfaceMap = new TreeMap<>();
+    private Map<Long, Long> nextIndicies = new TreeMap<>();
+    private Map<Long, Long> matchIndicies = new TreeMap<>();
+
+    // Ready scheduler. For cluster formation.
     private ScheduledExecutorService readyScheduler = Executors.newScheduledThreadPool(1);
     private ScheduledFuture<?> readyFuture;
     private TimerTask readyTask;
 
+    // Election scheduler for elections.
     private ScheduledExecutorService electionScheduler = Executors.newScheduledThreadPool(1);
     private ScheduledFuture<?> electionFuture;
     private ElectionTask electionTask;
-
+ 
+    // Heartbeat scheduler for producing heartbeats.
     private ScheduledExecutorService heartbeatsScheduler = Executors.newScheduledThreadPool(1);
     private ScheduledFuture<?> heartbeatsFuture;
     private HeartbeatsTask hearbeatsTask;
 
-
+    // Cluster formation state variables.
     private boolean clusterFormed = false;
     private boolean serverAddedToOtherServers = false;
+
+    // Value to be set.
+    private long value;
 
     protected RaftServer(Long id, RaftServersCfg cfg, RaftServerDb db) throws RemoteException, IOException {
         super();
         this.id = id;
         this.cfg = cfg;
         this.db = db;
+
+        // Get last log index.
+        long lastLogIndex = -1;
+        RaftEntry lastLogEntry = db.readLastEntry();
+        if (lastLogEntry != null) {
+            lastLogIndex = lastLogEntry.getIndex();
+        }
+
+        // Initialize next indicies. 
+	for (Long serverId : cfg.getInfos().keySet()) {
+            if (serverId != id) {
+                nextIndicies.put(serverId, lastLogIndex + 1);
+            }
+        }
+
+        // Initialize match indicies.
+        for (Long serverId : cfg.getInfos().keySet()) {
+            if (serverId != id) {
+                matchIndicies.put(serverId, 0L);
+            }
+        }
 
         log("Server started.");
 
@@ -156,6 +199,37 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
         });
     }
 
+    public void setValue(long value) {
+        synchronized (lock) {
+            this.value = value;
+            log("Value set to " + value);
+        }
+    }
+
+    public long getCommitIndex() {
+        return commitIndex;
+    }
+  
+    public void setCommitIndex(long commitIndex) {
+        this.commitIndex = commitIndex;
+    }
+  
+    public long getLastApplied() { 
+        return lastApplied;
+    }
+
+    public void setLastApplied(long lastApplied) { 
+        this.lastApplied = lastApplied;
+    }
+
+    public Map<Long, Long> getNextIndicies() {
+        return nextIndicies;
+    }
+
+    public Map<Long, Long> getMatchIndicies() {
+        return matchIndicies;
+    }
+
     // Get current server Id.
     public Long getId() {
         return id;
@@ -229,10 +303,21 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
 
     @Override
     public RaftRequestVoteResult requestVote(Long term, Long candidateId, Long lastLogIndex, Long lastLogTerm) throws RemoteException, IOException {
-        long currentTerm = db.readCurrentTerm().get();
+        long currentTerm;
+        long currentLastLogIndex;
+        long currentLastLogTerm;
         boolean voteGranted = false;
         String votedForStr = "";
         synchronized (lock) {
+            currentTerm = db.readCurrentTerm().get();
+            RaftEntry currentLastLogEntry = db.readLastEntry();
+            if (currentLastLogEntry == null) {
+                currentLastLogIndex = -1;
+                currentLastLogTerm = -1;
+            } else {
+                currentLastLogIndex = currentLastLogEntry.getIndex();
+                currentLastLogTerm = currentLastLogEntry.getTerm();
+            }
             if (term > currentTerm) {
                 db.writeCurrentTerm(new AtomicLong(term));
                 currentTerm = db.readCurrentTerm().get();
@@ -244,7 +329,8 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
             if (term < currentTerm) {
                  voteGranted = false;
             } else {
-                 if (votedFor == null || votedFor.get() == candidateId) {
+                 if ((votedFor == null || votedFor.get() == candidateId) && 
+                     (currentLastLogTerm < lastLogTerm || (currentLastLogTerm == lastLogTerm && currentLastLogIndex <= lastLogIndex))) {
                      voteGranted = true;
                      votedFor = new AtomicLong(candidateId);
                      db.writeVotedFor(new AtomicLong(candidateId));
@@ -257,10 +343,11 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
     }
 
     @Override
-    public RaftAppendEntriesResult appendEntries(Long term, Long leaderId, Long prevLogIndex, RaftEntry[] entries, Long leaderCommit) throws RemoteException, IOException {
-        long currentTerm = db.readCurrentTerm().get();
+    public RaftAppendEntriesResult appendEntries(Long term, Long leaderId, Long prevLogIndex, Long prevLogTerm, RaftEntry[] entries, Long leaderCommit) throws RemoteException, IOException {
+        long currentTerm ;
         boolean success = false;
         synchronized (lock) {
+            currentTerm = db.readCurrentTerm().get();
             if (term > currentTerm) {
                 db.writeCurrentTerm(new AtomicLong(term));
                 currentTerm = db.readCurrentTerm().get();
@@ -274,23 +361,89 @@ public class RaftServer extends UnicastRemoteObject implements RaftRMIInterface 
             if (term < currentTerm) {
                 success = false;
             } else {
-                success = true;
+                for (RaftEntry entry : entries) {
+                    db.writeEntry(entry);
+                }
+                RaftEntry entry = db.readEntry(prevLogIndex);
+                if (prevLogIndex == -1 || entry != null) { 
+                    success = true;
+                }
             }
+        }
+        String entriesStr = "";
+        for (RaftEntry entry : entries) {
+            entriesStr += (entry.getIndex() + " " + entry.getTerm() + " " + entry.getCommand() + "\n");
+        }
+        if (entries.length > 0) {
+            log("AppendEntries: Term= " + term + "; LeaderId=" + leaderId + "; prevLogIndex=" + prevLogIndex + "; entries=" + entriesStr + "; leaderCommit=" + leaderCommit);
+        }
+
+        synchronized (lock) {
+            if (prevLogIndex == -1) { 
+                for (RaftEntry entry : entries) {
+                    db.writeEntry(entry);
+                    commitIndex++;
+               }
+           }
+           for (long i = lastApplied; i < leaderCommit; i++) {
+               RaftEntry commitEntry = db.readEntry(i+1);
+               log("Commit entry " + commitEntry.getCommand());
+               lastApplied = commitEntry.getIndex();
+           }
         }
         return new RaftAppendEntriesResult(currentTerm, success);
     }
 
     @Override
     public RaftCmdResult processCmd(String cmd) throws RemoteException, IOException {
-      log("Processing cmd " + cmd);
-      if (serverState == RaftServerState.LEADER) {
-        log("I am the leader. Processing cmd " + cmd);
+        long currentTerm;
+        boolean success;
+        long lastLogIndex = 0;
+        long entryIndex;
+        long entryTerm;
+        log("Processing cmd " + cmd);
+        synchronized (lock) {
+             currentTerm = db.readCurrentTerm().get();
+            if (serverState == RaftServerState.LEADER) {
+                log("I am the leader. Processing cmd " + cmd);
+                RaftEntry lastLogEntry = db.readLastEntry();
+                if (lastLogEntry != null) {
+                    lastLogIndex = lastLogEntry.getIndex();
+                }
+                entryIndex = lastLogIndex + 1;
+                entryTerm = currentTerm;
+                db.writeEntry(new RaftEntry(lastLogIndex + 1, currentTerm, cmd));
+            } else {
+                long lastKnownLeaderId = db.readVotedFor().get();
+                log("I am not the leader. Last known leader is " + lastKnownLeaderId);
+                return new RaftCmdResult(false, lastKnownLeaderId, null);
+            }
+        }
+        while (true) {
+            try {
+                int numMatches;
+                synchronized (matchIndicies) {
+                    numMatches = 0;
+                    for (Long serverId : matchIndicies.keySet()) {
+                        if (matchIndicies.get(serverId) >= entryIndex) {
+                            numMatches++;
+                        }
+                    }
+                }
+                if (numMatches >= ((cfg.getNumServers() + 1) / 2)) {
+                    log("Committing " + cmd + " to the state machine.");
+                    if (entryIndex > commitIndex) { 
+                        commitIndex = entryIndex;
+                    } 
+                    if (entryIndex > lastApplied) {
+                        lastApplied = entryIndex;
+                    }
+                    break;
+                }
+                Thread.sleep(100);
+            } catch (Exception ex) {}
+        }
         return new RaftCmdResult(true, id, "Command processed.");
-      } else {
-        long lastKnownLeaderId = db.readVotedFor().get();
-        log("I am not the leader. Last known leader is " + lastKnownLeaderId);
-        return new RaftCmdResult(false, lastKnownLeaderId, null);
-      }
     }
 
     // Log message. 
